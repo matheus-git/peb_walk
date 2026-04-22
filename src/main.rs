@@ -3,6 +3,7 @@
 
 use core::ffi::c_void;
 use core::panic::PanicInfo;
+use core::arch::asm;
 
 // ================= PANIC =================
 
@@ -40,47 +41,114 @@ fn hash(name: *const u8) -> u32 {
 
 #[repr(C)]
 struct LIST_ENTRY {
-    flink: *mut LIST_ENTRY,
-    blink: *mut LIST_ENTRY,
+    flink: *const LIST_ENTRY,
+    blink: *const LIST_ENTRY,
+}
+
+#[repr(C)]
+pub struct UNICODE_STRING {
+    pub length: u16,
+    pub maximum_length: u16,
+    pub buffer: *mut u16,
 }
 
 #[repr(C)]
 struct LDR_DATA_TABLE_ENTRY {
     _pad1: [u8; 0x30],
     dll_base: *mut c_void,
+    _pad2: [u8; 0x20],
+    base_dll_name: UNICODE_STRING,
 }
 
 #[repr(C)]
 struct PEB_LDR_DATA {
-    _pad: [u8; 0x10],
+    _pad: [u8; 0x20],
     in_memory_order_module_list: LIST_ENTRY,
 }
 
 #[repr(C)]
 struct PEB {
     _pad: [u8; 0x18],
-    ldr: *mut PEB_LDR_DATA,
+    ldr: *const PEB_LDR_DATA,
 }
 
-unsafe fn get_peb() -> *mut PEB {
-    let peb;
-    core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
-    peb
+fn get_peb() -> *const PEB {
+    unsafe{ 
+        let peb;
+        asm!("mov {}, gs:[0x60]", out(reg) peb);
+        peb
+    }
 }
 
-// ================= KERNEL32 =================
+const IN_MEMORY_ORDER_LINKS_OFFSET: usize = 0x10;
 
-unsafe fn get_kernel32() -> *mut c_void {
-    let peb = get_peb();
-    let ldr = (*peb).ldr;
+fn get_base_module(dll_name: &[u8]) -> Option<*const c_void> {
+    unsafe {
+        let peb = get_peb();
+        let ldr = (*peb).ldr;
 
-    let mut list = (*ldr).in_memory_order_module_list.flink;
+        if ldr.is_null() {
+            return None;
+        }
 
-    list = (*list).flink; // ntdll
-    list = (*list).flink; // kernel32
+        let head = &(*ldr).in_memory_order_module_list as *const LIST_ENTRY;
+        let mut current = (*head).flink;
 
-    let entry = list as *mut LDR_DATA_TABLE_ENTRY;
-    (*entry).dll_base
+        while current != head {
+            let entry = (current as usize - IN_MEMORY_ORDER_LINKS_OFFSET) as *const LDR_DATA_TABLE_ENTRY;
+
+            let base_name = &(*entry).base_dll_name;
+
+            if cmp_utf16_ascii_case_insensitive(
+                base_name.buffer,
+                (base_name.length / 2) as usize,
+                dll_name,
+            ) {
+                return Some((*entry).dll_base);
+            }
+
+            current = (*current).flink;
+        }
+
+        None
+    }
+}
+
+fn cmp_utf16_ascii_case_insensitive(
+    buf: *const u16,
+    len: usize,
+    ascii: &[u8],
+) -> bool {
+    if len != ascii.len() {
+        return false;
+    }
+
+    let mut i = 0;
+
+    while i < len {
+        let c1 = unsafe { *buf.add(i) as u8 };
+        let c2 = ascii[i];
+
+        let c1 = if c1 >= b'a' && c1 <= b'z' {
+            c1 - 32
+        } else {
+            c1
+        };
+
+        let c2 = if c2 >= b'a' && c2 <= b'z' {
+            c2 - 32
+        } else {
+            c2
+        };
+
+        if c1 != c2 {
+            return false;
+        }
+
+        i += 1;
+    }
+
+    true
 }
 
 // ================= EXPORT =================
@@ -119,7 +187,7 @@ struct IMAGE_EXPORT_DIRECTORY {
     address_of_name_ordinals: u32,
 }
 
-unsafe fn get_proc_by_hash(base: *mut c_void, target_hash: u32) -> *mut c_void {
+unsafe fn get_proc_by_hash(base: *const c_void, target_hash: u32) -> *mut c_void {
     let base = base as usize;
 
     let dos = base as *const IMAGE_DOS_HEADER;
@@ -153,7 +221,7 @@ unsafe fn get_proc_by_hash(base: *mut c_void, target_hash: u32) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     unsafe {
-        let k32 = get_kernel32();
+        let k32 = get_base_module(b"KERNEL32.DLL").unwrap();
 
         // hashes (pré-calculados)
         let loadlib_hash = 0xec0e4e8e; // LoadLibraryA
