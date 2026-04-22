@@ -157,7 +157,7 @@ struct IMAGE_EXPORT_DIRECTORY {
     address_of_name_ordinals: u32,
 }
 
-fn get_proc_by_hash(base: *const c_void, target: &[u8]) -> *const c_void {
+fn get_proc_by_name(base: *const c_void, target: &[u8]) -> *const c_void {
     unsafe{
         let base = base as usize;
 
@@ -217,22 +217,22 @@ pub extern "C" fn main() -> i32 {
             None => return 1
         };
 
-        let loadlib_addr = get_proc_by_hash(k32, b"LoadLibraryA\0");
-        let getproc_addr = get_proc_by_hash(k32, b"GetProcAddress\0");
+        let loadlib_addr = get_proc_by_name(k32, b"LoadLibraryA\0");
 
         type LoadLibraryAT =
             unsafe extern "system" fn(*const u8) -> *mut c_void;
 
-        type GetProcAddressT =
-            unsafe extern "system" fn(*mut c_void, *const u8) -> *mut c_void;
-
         let load_library: LoadLibraryAT = core::mem::transmute(loadlib_addr);
-        let get_proc: GetProcAddressT = core::mem::transmute(getproc_addr);
 
-        let user32 = load_library(b"user32.dll\0".as_ptr());
+        load_library(b"user32.dll\0".as_ptr());
+
+        let user32 = match get_base_module(b"USER32.DLL") {
+            Some(addr) => addr,
+            None => return 1
+        };
 
         let msgbox_addr =
-            get_proc(user32, b"MessageBoxA\0".as_ptr());
+            get_proc_by_name(user32, b"MessageBoxA\0");
 
         type MessageBoxAT = unsafe extern "system" fn(
             *mut c_void,
