@@ -5,39 +5,12 @@ use core::ffi::c_void;
 use core::panic::PanicInfo;
 use core::arch::asm;
 
-// ================= PANIC =================
-
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
     }
 }
-
-// ================= HASH =================
-
-fn hash(name: *const u8) -> u32 {
-    let mut h = 0u32;
-    let mut i = 0;
-
-    unsafe {
-        loop {
-            let c = *name.add(i);
-            if c == 0 {
-                break;
-            }
-
-            h = h.rotate_right(13);
-            h = h.wrapping_add(c as u32);
-
-            i += 1;
-        }
-    }
-
-    h
-}
-
-// ================= PEB =================
 
 #[repr(C)]
 struct LIST_ENTRY {
@@ -151,24 +124,21 @@ fn cmp_utf16_ascii_case_insensitive(
     true
 }
 
-// ================= EXPORT =================
-
 #[repr(C)]
 struct IMAGE_DOS_HEADER {
-    _pad: [u8; 60],
+    _pad: [u8; 0x3c],
     e_lfanew: i32,
 }
 
 #[repr(C)]
 struct IMAGE_NT_HEADERS64 {
-    _sig: u32,
-    _file: [u8; 20],
+    _pad: [u8; 0x18],
     optional: IMAGE_OPTIONAL_HEADER64,
 }
 
 #[repr(C)]
 struct IMAGE_OPTIONAL_HEADER64 {
-    _pad: [u8; 112],
+    _pad: [u8; 0x70],
     export: IMAGE_DATA_DIRECTORY,
 }
 
@@ -180,14 +150,14 @@ struct IMAGE_DATA_DIRECTORY {
 
 #[repr(C)]
 struct IMAGE_EXPORT_DIRECTORY {
-    _pad: [u8; 24],
+    _pad: [u8; 0x18],
     number_of_names: u32,
     address_of_functions: u32,
     address_of_names: u32,
     address_of_name_ordinals: u32,
 }
 
-unsafe fn get_proc_by_hash(base: *const c_void, target_hash: u32) -> *mut c_void {
+unsafe fn get_proc_by_hash(base: *const c_void, target: &[u8]) -> *const c_void {
     let base = base as usize;
 
     let dos = base as *const IMAGE_DOS_HEADER;
@@ -205,30 +175,46 @@ unsafe fn get_proc_by_hash(base: *const c_void, target_hash: u32) -> *mut c_void
         let name_rva = *names.add(i as usize);
         let name_ptr = (base + name_rva as usize) as *const u8;
 
-        if hash(name_ptr) == target_hash {
+        if strcmp(name_ptr, target.as_ptr()) {
             let ord = *ords.add(i as usize) as usize;
             let func_rva = *funcs.add(ord);
 
-            return (base + func_rva as usize) as *mut c_void;
+            return (base + func_rva as usize) as *const c_void;
         }
     }
 
     core::ptr::null_mut()
 }
 
-// ================= ENTRY =================
+unsafe fn strcmp(a: *const u8, b: *const u8) -> bool {
+    let mut i = 0;
+
+    loop {
+        let c1 = *a.add(i);
+        let c2 = *b.add(i);
+
+        if c1 != c2 {
+            return false;
+        }
+
+        if c1 == 0 {
+            return true;
+        }
+
+        i += 1;
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     unsafe {
-        let k32 = get_base_module(b"KERNEL32.DLL").unwrap();
+        let k32 = match get_base_module(b"KERNEL32.DLL") {
+            Some(addr) => addr,
+            None => return 1
+        };
 
-        // hashes (pré-calculados)
-        let loadlib_hash = 0xec0e4e8e; // LoadLibraryA
-        let getproc_hash = 0x7c0dfcaa; // GetProcAddress
-
-        let loadlib_addr = get_proc_by_hash(k32, loadlib_hash);
-        let getproc_addr = get_proc_by_hash(k32, getproc_hash);
+        let loadlib_addr = get_proc_by_hash(k32, b"LoadLibraryA\0");
+        let getproc_addr = get_proc_by_hash(k32, b"GetProcAddress\0");
 
         type LoadLibraryA_t =
             unsafe extern "system" fn(*const u8) -> *mut c_void;
@@ -239,10 +225,8 @@ pub extern "C" fn main() -> i32 {
         let load_library: LoadLibraryA_t = core::mem::transmute(loadlib_addr);
         let get_proc: GetProcAddress_t = core::mem::transmute(getproc_addr);
 
-        // carregar user32.dll
         let user32 = load_library(b"user32.dll\0".as_ptr());
 
-        // pegar MessageBoxA
         let msgbox_addr =
             get_proc(user32, b"MessageBoxA\0".as_ptr());
 
@@ -255,8 +239,8 @@ pub extern "C" fn main() -> i32 {
 
         let message_box: MessageBoxA_t = core::mem::transmute(msgbox_addr);
 
-        let text = b"Funcionou!\0";
-        let title = b"Rust no_std\0";
+        let text = b"text!\0";
+        let title = b"title\0";
 
         message_box(
             core::ptr::null_mut(),
