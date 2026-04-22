@@ -9,3 +9,6 @@ In this code, I demonstrate a functional example of PEB walking to resolve Windo
 ---
 
 I explain this code in details here: https://cyberspitfire.com/posts/peb_walk
+
+1. Build: `cargo build --release`
+2. The compiled binary is located at target/x86_64-pc-windows-msvc/release/no_iat
